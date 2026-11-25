@@ -10,3 +10,6 @@
 """
 from django.db import transaction  # noqa: F401
 from django.db.models import F  # noqa: F401
+
+def confirm_order(order_id: int, user):
+    pass
