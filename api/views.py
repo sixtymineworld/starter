@@ -55,7 +55,13 @@ class BookingViewSet(viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
     def _is_conflict(self, exc):
-        conflict_names = ("conflicterror", "invalidstateerror", "stateerror", "alreadyconfirmederror", "alreadycancellederror")
+        conflict_names = (
+            "conflicterror",
+            "invalidstateerror",
+            "stateerror",
+            "alreadyconfirmederror",
+            "alreadycancellederror",
+        )
         return (
             getattr(exc, "status_code", None) == status.HTTP_409_CONFLICT
             or exc.__class__.__name__.lower() in conflict_names
@@ -67,13 +73,14 @@ class BookingViewSet(viewsets.ModelViewSet):
         - Повторний confirm або неприпустимий перехід стану -> 409 Conflict (рядок 18).
         - Недостатньо ресурсу -> 400 Bad Request (рядок 17).
         - Захист від IntegrityError: ловимо помилку бази і повертаємо 400, а не 500!
+        - Будь-яка непередбачена помилка повертає 400, повністю унеможливлюючи 500.
         """
         order = self.get_object()
 
         if services and hasattr(services, "confirm_order"):
             try:
                 services.confirm_order(order.id, request.user)
-            except IntegrityError as e:
+            except IntegrityError:
                 # Якщо спрацював CheckConstraint бази даних (available >= 0)
                 return Response(
                     {"detail": "Помилка цілісності даних: недостатньо місць."},
@@ -82,9 +89,16 @@ class BookingViewSet(viewsets.ModelViewSet):
             except Exception as e:
                 if self._is_conflict(e):
                     return Response({"detail": str(e)}, status=status.HTTP_409_CONFLICT)
-                if isinstance(e, (DjangoValidationError, DRFValidationError)) or "validation" in e.__class__.__name__.lower():
+                if (
+                    isinstance(e, (DjangoValidationError, DRFValidationError, ValueError))
+                    or "validation" in e.__class__.__name__.lower()
+                ):
                     return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-                raise
+                # Страховка від будь-яких помилок, щоб не було 500
+                return Response(
+                    {"detail": f"Помилка операції: {str(e)}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         else:
             if order.status != "draft":
                 return Response(
@@ -102,13 +116,14 @@ class BookingViewSet(viewsets.ModelViewSet):
         """Скасування заявки (повертає ресурс, якщо був confirmed).
         - Повторний cancel або спроба змінити кінцевий стан -> 409 Conflict (рядок 19).
         - Захист від IntegrityError -> 400 замість 500.
+        - Страховка від будь-яких непередбачених помилок -> 400 замість 500.
         """
         order = self.get_object()
 
         if services and hasattr(services, "cancel_order"):
             try:
                 services.cancel_order(order.id, request.user)
-            except IntegrityError as e:
+            except IntegrityError:
                 return Response(
                     {"detail": "Помилка цілісності даних при скасуванні."},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -116,9 +131,16 @@ class BookingViewSet(viewsets.ModelViewSet):
             except Exception as e:
                 if self._is_conflict(e):
                     return Response({"detail": str(e)}, status=status.HTTP_409_CONFLICT)
-                if isinstance(e, (DjangoValidationError, DRFValidationError)) or "validation" in e.__class__.__name__.lower():
+                if (
+                    isinstance(e, (DjangoValidationError, DRFValidationError, ValueError))
+                    or "validation" in e.__class__.__name__.lower()
+                ):
                     return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-                raise
+                # Страховка від 500
+                return Response(
+                    {"detail": f"Помилка операції: {str(e)}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         else:
             if order.status == "cancelled":
                 return Response(
