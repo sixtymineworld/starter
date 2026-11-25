@@ -1,0 +1,15 @@
+{
+  "base_url": "http://127.0.0.1:8000",
+  "token_url": "/api/v1/auth/token/",
+  "items": "/api/v1/bikes/",
+  "orders": "/api/v1/rentals/",
+  "item_field": "bike",
+  "qty_field": "quantity",
+  "left_field": "available",
+  "order_extra": {},
+  "race_item": 0,
+  "users": {
+    "attacker1": "attack-pass-1",
+    "attacker2": "attack-pass-2"
+  }
+}
