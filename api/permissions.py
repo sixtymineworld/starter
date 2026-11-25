@@ -1,6 +1,12 @@
-"""Роль «Доступ». Власні класи прав.
+"""Роль «Доступ». Власні класи прав."""
+from rest_framework import permissions
 
-Заявку бачить і змінює лише її власник. Пам'ятайте: `has_object_permission`
-не викликається для списку — список фільтрує `get_queryset`.
-"""
-from rest_framework import permissions  # noqa: F401
+
+class IsOwner(permissions.BasePermission):
+    """Без токена -> 401, включно зі списком."""
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated)
+
+    def has_object_permission(self, request, view, obj):
+        return obj.owner_id == request.user.id
