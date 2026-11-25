@@ -8,6 +8,9 @@
 окремо. Скрипт сам створює потрібні заявки від attacker1 і attacker2. Перед повторним
 прогоном 22-го рядка відновіть залишок: python manage.py seed_attack.
 
+Рядки 23–35 — додаткові регресійні перевірки інваріанта: їхній результат не входить
+до відкритої карти, зате вони ловлять неочевидні обходи через PATCH, DELETE і гонки.
+
 Ганяйте його проти себе скільки завгодно: це специфікація, а не іспит.
 """
 import argparse
@@ -17,8 +20,10 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 
 from apiclient import Api, _NoRedirect, fire_at_once, is_ok, load_contract
+from race import confirm_vs_mutation, confirm_vs_two_patches
 
 DENIED = (403, 404)
 ROWS = {}
@@ -291,6 +296,204 @@ def r22(c):
     return wins == stock and after == 0 and errors == 0, note
 
 
+# --- додаткові регресійні перевірки захисту ----------------------------------
+
+@row(23, "після confirm PATCH, PUT і DELETE заборонені", "409/409/409; cancel повертає рівно ресурс")
+def r23(c):
+    before = c.api.left(c.item)
+    order = c.new_order(qty=1)
+    confirmed = c.api.action(c.t1, order, "confirm")
+    patch, _ = c.api.request(
+        "PATCH", c.api.order_path(order), {c.api.c["qty_field"]: 2}, token=c.t1
+    )
+
+    other_item = next(
+        (item["id"] for item in c.api.items() if isinstance(item, dict) and item.get("id") != c.item),
+        c.item,
+    )
+    put_body = c.api.order_body(other_item, 1)
+    put, _ = c.api.request("PUT", c.api.order_path(order), put_body, token=c.t1)
+    delete, _ = c.api.request("DELETE", c.api.order_path(order), token=c.t1)
+    cancelled = c.api.action(c.t1, order, "cancel")
+    after = c.api.left(c.item)
+    ok = is_ok(confirmed) and patch == 409 and put == 409 and delete == 409 and is_ok(cancelled) and after == before
+    return ok, f"confirm/PATCH/PUT/DELETE/cancel: {confirmed}/{patch}/{put}/{delete}/{cancelled}; {before}→{after}"
+
+
+@row(24, "Гонка: confirm одночасно з PATCH", "confirmed-заявка і залишок відповідає її quantity")
+def r24(c):
+    return confirm_vs_mutation(c.api, c.t1, c.item, 1, "confirm-patch")
+
+
+@row(25, "Гонка: confirm одночасно з DELETE", "або draft видалено без списання, або confirmed лишився")
+def r25(c):
+    return confirm_vs_mutation(c.api, c.t1, c.item, 1, "confirm-delete")
+
+
+@row(26, "PATCH не підміняє owner або status", "заявка лишається моєю draft, залишок не змінюється")
+def r26(c):
+    before = c.api.left(c.item)
+    foreign = c.foreign()
+    _, foreign_data = c.api.request("GET", c.api.order_path(foreign), token=c.t2)
+    foreign_owner = foreign_data.get("owner") if isinstance(foreign_data, dict) else None
+    order = c.new_order()
+    code, _ = c.api.request(
+        "PATCH", c.api.order_path(order),
+        {"owner": foreign_owner, "status": "confirmed"}, token=c.t1,
+    )
+    mine, data = c.api.request("GET", c.api.order_path(order), token=c.t1)
+    theirs, _ = c.api.request("GET", c.api.order_path(order), token=c.t2)
+    after = c.api.left(c.item)
+    if code == 400:
+        return True, f"PATCH {code}"
+    ok = (
+        code == 200
+        and mine == 200
+        and isinstance(data, dict)
+        and data.get("status") == "draft"
+        and data.get("owner") != foreign_owner
+        and theirs in DENIED
+        and after == before
+    )
+    return ok, f"PATCH {code}; статус {data.get('status') if isinstance(data, dict) else data}; залишок {before}→{after}"
+
+
+@row(27, "cancel draft не повертає не зайняті місця", "cancel 2xx; залишок без змін; confirm після цього 409")
+def r27(c):
+    before = c.api.left(c.item)
+    order = c.new_order()
+    cancelled = c.api.action(c.t1, order, "cancel")
+    confirm = c.api.action(c.t1, order, "confirm")
+    after = c.api.left(c.item)
+    return is_ok(cancelled) and confirm == 409 and after == before, f"cancel/confirm: {cancelled}/{confirm}; {before}→{after}"
+
+
+@row(28, "зміна draft списує та повертає саме нову кількість і тренування", "після cancel обидва залишки відновлено")
+def r28(c):
+    items = c.api.items()
+    other = next(
+        (
+            item["id"] for item in items
+            if isinstance(item, dict)
+            and item.get("id") not in {c.item, c.api.c["race_item"]}
+            and isinstance(item.get(c.api.c["left_field"]), int)
+            and item[c.api.c["left_field"]] >= 2
+        ),
+        None,
+    )
+    if other is None:
+        return False, "немає другого звичайного тренування з двома вільними місцями"
+    original_before, other_before = c.api.left(c.item), c.api.left(other)
+    order = c.new_order(item=c.item, qty=1)
+    patch, _ = c.api.request(
+        "PATCH", c.api.order_path(order), c.api.order_body(other, 2), token=c.t1
+    )
+    confirmed = c.api.action(c.t1, order, "confirm")
+    original_after_confirm, other_after_confirm = c.api.left(c.item), c.api.left(other)
+    cancelled = c.api.action(c.t1, order, "cancel")
+    original_after_cancel, other_after_cancel = c.api.left(c.item), c.api.left(other)
+    ok = (
+        patch == 200
+        and is_ok(confirmed)
+        and original_after_confirm == original_before
+        and other_after_confirm == other_before - 2
+        and is_ok(cancelled)
+        and original_after_cancel == original_before
+        and other_after_cancel == other_before
+    )
+    return ok, (
+        f"PATCH/confirm/cancel {patch}/{confirmed}/{cancelled}; "
+        f"старе {original_before}→{original_after_confirm}→{original_after_cancel}; "
+        f"нове {other_before}→{other_after_confirm}→{other_after_cancel}"
+    )
+
+
+@row(29, "Гонка: confirm одночасно з cancel", "заявка cancelled, залишок повернувся рівно раз")
+def r29(c):
+    return confirm_vs_mutation(c.api, c.t1, c.item, 1, "confirm-cancel")
+
+
+@row(30, "Гонка: 10 cancel однієї confirmed-заявки", "один 2xx, заявка cancelled, місця повернуті раз")
+def r30(c):
+    order = c.new_order()
+    if not is_ok(c.api.action(c.t1, order, "confirm")):
+        return False, "підготовчий confirm не пройшов"
+    before = c.api.left(c.item)
+    codes = fire_at_once([lambda: c.api.action(c.t1, order, "cancel")] * 10)
+    after = c.api.left(c.item)
+    code, data = c.api.request("GET", c.api.order_path(order), token=c.t1)
+    wins = sum(is_ok(code) for code in codes)
+    ok = code == 200 and isinstance(data, dict) and data.get("status") == "cancelled" and wins == 1 and after == before + 1
+    return ok, f"{dict(sorted(Counter(codes).items()))}; залишок {before}→{after}"
+
+
+@row(31, "Пакетна бухгалтерія: 6 заявок різної кількості", "після часткових cancel залишок точний, після всіх — початковий")
+def r31(c):
+    quantities = (1, 2, 3, 1, 2, 3)
+    before = c.api.left(c.item)
+    if before < sum(quantities):
+        return False, f"потрібно {sum(quantities)} місць, є {before}"
+    orders = [c.new_order(qty=qty) for qty in quantities]
+    confirms = [c.api.action(c.t1, order, "confirm") for order in orders]
+    middle = (1, 3, 5)
+    partial_cancels = [c.api.action(c.t1, orders[index], "cancel") for index in middle]
+    after_partial = c.api.left(c.item)
+    expected_partial = before - sum(qty for index, qty in enumerate(quantities) if index not in middle)
+    rest = [index for index in range(len(orders)) if index not in middle]
+    final_cancels = [c.api.action(c.t1, orders[index], "cancel") for index in rest]
+    after_final = c.api.left(c.item)
+    ok = (
+        all(is_ok(code) for code in confirms + partial_cancels + final_cancels)
+        and after_partial == expected_partial
+        and after_final == before
+    )
+    return ok, f"залишок {before}→{after_partial} (очікували {expected_partial})→{after_final}"
+
+
+@row(32, "Нетипові JSON-тіла", "null, масив і рядок у quantity дають 400, не 500")
+def r32(c):
+    bad_bodies = (
+        b"null",
+        b"[]",
+        ('{"%s": %d, "%s": "not-a-number"}' % (c.api.c["item_field"], c.item, c.api.c["qty_field"])).encode(),
+    )
+    codes = [
+        c.api.request("POST", c.api.order_path(), token=c.t1, raw=body)[0]
+        for body in bad_bodies
+    ]
+    return all(code == 400 for code in codes), "/".join(map(str, codes))
+
+
+@row(33, "Недозволені HTTP-методи для confirm/cancel", "405 і стан/залишок не змінюються")
+def r33(c):
+    before = c.api.left(c.item)
+    order = c.new_order()
+    methods = (
+        c.api.request("GET", c.api.order_path(order, "confirm"), token=c.t1)[0],
+        c.api.request("PATCH", c.api.order_path(order, "confirm"), {}, token=c.t1)[0],
+        c.api.request("PUT", c.api.order_path(order, "cancel"), {}, token=c.t1)[0],
+    )
+    code, data = c.api.request("GET", c.api.order_path(order), token=c.t1)
+    after = c.api.left(c.item)
+    ok = all(method == 405 for method in methods) and code == 200 and isinstance(data, dict) and data.get("status") == "draft" and after == before
+    return ok, f"методи {'/'.join(map(str, methods))}; стан {data.get('status') if isinstance(data, dict) else data}; {before}→{after}"
+
+
+@row(34, "Невалідний JWT", "401 для читання й запису, без створення заявки")
+def r34(c):
+    fake = "not-a.jwt.token"
+    before = c.api.left(c.item)
+    listing, _ = c.api.request("GET", c.api.order_path(), token=fake)
+    created, _ = c.api.request("POST", c.api.order_path(), c.api.order_body(c.item, 1), token=fake)
+    after = c.api.left(c.item)
+    return listing == 401 and created == 401 and after == before, f"GET/POST {listing}/{created}; {before}→{after}"
+
+
+@row(35, "Гонка: confirm одночасно з двома різними PATCH", "залишок дорівнює фінальній quantity")
+def r35(c):
+    return confirm_vs_two_patches(c.api, c.t1, c.item, 1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--contract", default="contract.json")
@@ -318,6 +521,9 @@ def main():
     for n, name in ((21, "Гонка А"), (22, "Гонка Б")):
         if n in passed:
             print(f"{name}: {'витримано' if passed[n] else 'ПРОБИТО'}")
+    extra_rows = [n for n in passed if n >= 23]
+    if extra_rows:
+        print(f"Додатковий захист: {sum(passed[n] for n in extra_rows)} / {len(extra_rows)}")
     print("Гонки ймовірнісні: зелений результат — не доказ, червоний — доказ.")
     sys.exit(0 if all(passed.values()) else 1)
 
