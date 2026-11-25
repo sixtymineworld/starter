@@ -83,9 +83,29 @@ python tools/race.py --help
 
 ## Наш домен
 
-*Заповнити:* домен, обмежений ресурс, адреси каталогу й заявок, поля.
+**Домен:** Спортзал. **Обмежений ресурс:** вільні місця на тренуванні.
+
+- `Workout` — каталог тренувань: `title` (назва) та `available` (залишок місць).
+  На `available` встановлено `CheckConstraint`, що забороняє від’ємне значення.
+- `Booking` — бронювання: `workout` (FK на `Workout`), `owner` (FK на
+  `settings.AUTH_USER_MODEL`), `quantity` (кількість місць) і `status`.
+- Допустимі статуси бронювання: `draft`, `confirmed`, `cancelled`; типовий — `draft`.
+
+API-контракт для цього домену: каталог — `/api/v1/workouts/`, бронювання —
+`/api/v1/bookings/`. Поля контракту: `item_field=workout`, `qty_field=quantity`,
+`left_field=available`.
 
 ## Сценарій у curl
 
-*Заповнити:* вхід → каталог → заявка → `confirm` → залишок зменшився → повторний
-`confirm` `409` → `cancel` → залишок повернувся.
+1. Отримати JWT для `attacker1` або `attacker2`.
+2. Переглянути каталог `GET /api/v1/workouts/`.
+3. Створити бронювання `POST /api/v1/bookings/` із `workout` та `quantity`.
+4. Підтвердити бронювання через `POST /api/v1/bookings/<id>/confirm/`.
+5. Перевірити, що `available` зменшився на `quantity`. Повторне підтвердження має
+   бути відхилене з `409`.
+6. Скасувати бронювання через `POST /api/v1/bookings/<id>/cancel/` і перевірити,
+   що місця повернулися до залишку.
+
+Команда `python manage.py seed_attack` створює два тестові акаунти, два звичайні
+тренування із залишком 50 та одне тренування із залишком 1. Вона автоматично
+записує реальний ID останнього тренування в `contract.json` у поле `race_item`.
