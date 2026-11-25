@@ -6,27 +6,56 @@
 Атакувальник клонує ваш репозиторій на тегу `attack` і запускає саме ці дві команди,
 тож усе, без чого атака неможлива, має створюватися тут.
 """
+
+import json
+from pathlib import Path
+
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 
-# Ті самі паролі — у contract.json.
+from api.models import Workout
+
 ATTACKERS = {"attacker1": "attack-pass-1", "attacker2": "attack-pass-2"}
 
 
 class Command(BaseCommand):
-    help = "Акаунти attacker1/attacker2 і каталог для атаки."
+    help = "Створює attacker1/attacker2 та тренування для тестів API."
 
     def handle(self, *args, **options):
         User = get_user_model()
         for username, password in ATTACKERS.items():
             user, _ = User.objects.get_or_create(username=username)
             user.set_password(password)
-            user.save()
+            user.save(update_fields=["password"])
 
-        # TODO (Моделі), через update_or_create, щоб повторний запуск відновлював стан:
-        #   1. кілька звичайних елементів каталогу із залишком 50;
-        #   2. один елемент для гонки із залишком рівно 1 — його id іде
-        #      в contract.json як "race_item".
-        # Заявки attacker2 створювати не треба: скрипт атаки зробить це сам.
+        # update_or_create робить команду повторно-запускною і відновлює
+        # залишки після race-тесту.
+        workouts = [
+            ("Загальна фізична підготовка", 50),
+            ("Силове тренування", 50),
+            ("Тренування з одним вільним місцем", 1),
+        ]
+        race_workout = None
+        for title, available in workouts:
+            workout, _ = Workout.objects.update_or_create(
+                title=title,
+                defaults={"available": available},
+            )
+            if available == 1:
+                race_workout = workout
 
-        self.stdout.write(self.style.SUCCESS("Готово: attacker1, attacker2, каталог."))
+        # Скрипти атаки беруть id ресурсу саме з contract.json.
+        contract_path = Path(settings.BASE_DIR) / "contract.json"
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract["race_item"] = race_workout.pk
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Готово: attacker1, attacker2, каталог; race_item={race_workout.pk}."
+            )
+        )
