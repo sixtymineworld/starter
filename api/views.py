@@ -75,23 +75,23 @@ class BookingViewSet(viewsets.ModelViewSet):
         Умовний DELETE прямо в базі видаляє запис ТІЛЬКИ якщо статус досі 'draft'.
         Якщо паралельний confirm уже списав ресурс, delete видалить 0 рядків і поверне 409!
         """
-        pk = kwargs.get("pk")
         with transaction.atomic():
+            order = self.get_object()
+            if order.status != Booking.Status.DRAFT:
+                return Response(
+                    {"detail": f"Неможливо видалити заявку зі статусом '{order.status}'."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
             deleted_count, _ = Booking.objects.filter(
-                pk=pk,
+                pk=order.pk,
                 owner=self.request.user,
                 status=Booking.Status.DRAFT,
             ).delete()
 
             if deleted_count == 0:
-                order = Booking.objects.filter(pk=pk, owner=self.request.user).first()
-                if not order:
-                    return Response(
-                        {"detail": "Заявку не знайдено."},
-                        status=status.HTTP_404_NOT_FOUND,
-                    )
                 return Response(
-                    {"detail": f"Неможливо видалити заявку зі статусом '{order.status}'."},
+                    {"detail": "Неможливо видалити заявку: її статус змінився."},
                     status=status.HTTP_409_CONFLICT,
                 )
 

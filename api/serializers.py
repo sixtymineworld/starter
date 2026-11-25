@@ -36,12 +36,4 @@ class BookingSerializer(serializers.ModelSerializer):
         if self.instance and self.instance.status != "draft":
             raise serializers.ValidationError("Змінювати можна лише заявки у статусі draft.")
 
-        workout = attrs.get("workout") or (self.instance.workout if self.instance else None)
-        quantity = attrs.get("quantity") or (self.instance.quantity if self.instance else None)
-
-        if workout and quantity is not None and quantity > workout.available:
-            raise serializers.ValidationError(
-                {"quantity": f"Недостатньо місць на тренуванні (доступно: {workout.available})."}
-            )
-
         return attrs
